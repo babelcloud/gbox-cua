@@ -30,16 +30,25 @@ pip install -e .
 
 ### As a Standalone Agent
 
-For full standalone functionality, you'll also need rl-cua:
+`gbox-cua` can run independently without requiring rl-cua or OSWorld:
 
 ```bash
 # Install gbox-cua from git
 pip install git+https://github.com/babelcloud/gbox-cua.git
 
-# Install rl-cua for full agent implementation
-cd /path/to/rl-cua
-pip install -e .
+# Set environment variables
+export GBOX_API_KEY="your_gbox_api_key"
+export VLM_PROVIDER="openai"  # or "vllm" or "openrouter"
+export OPENAI_API_KEY="your_openai_key"  # if using OpenAI
+
+# Run agent
+gbox-cua "Open the Settings app"
 ```
+
+The standalone agent supports:
+- **VLM Providers**: vllm, openai, openrouter
+- **Box Types**: android, linux
+- **All standard actions**: click, swipe, scroll, input, key_press, button_press
 
 ## Usage
 
@@ -60,28 +69,62 @@ system_prompt = create_system_prompt("Your task description", max_turns=20)
 ```bash
 # Set environment variables
 export GBOX_API_KEY="your_gbox_api_key"
-export VLLM_API_BASE="http://localhost:8000/v1"  # Optional
 
-# Run agent
+# Option 1: Using OpenAI
+export VLM_PROVIDER="openai"
+export OPENAI_API_KEY="your_openai_key"
 gbox-cua "Open the Settings app"
+
+# Option 2: Using OpenRouter
+export VLM_PROVIDER="openrouter"
+export OPENROUTER_API_KEY="your_openrouter_key"
 gbox-cua --task "Search for weather" --box-type android --verbose
+
+# Option 3: Using vLLM (local server)
+export VLM_PROVIDER="vllm"
+export VLLM_API_BASE="http://localhost:8000/v1"
+gbox-cua --task "Navigate to gmail.com" --box-type linux
 ```
 
 ### Using Docker
 
+#### Quick Start
+
+```bash
+# 1. Configure environment variables
+cp env.example .env
+# Edit .env and fill in your API keys
+
+# 2. Build Docker image
+./build_docker.sh
+
+# 3. Run agent
+./docker_run.sh "Open the Settings app"
+```
+
+#### Manual Docker Commands
+
 ```bash
 # Build image
-docker build -t gbox-cua-agent:latest .
+docker build -t gbox-cua:latest .
 
 # Run with environment variables
 docker run -e GBOX_API_KEY=your_key \
            -e VLLM_API_BASE=http://localhost:8000/v1 \
-           gbox-cua-agent:latest \
+           gbox-cua:latest \
            "Open the Settings app"
 
 # Or use docker-compose
 docker-compose up
 ```
+
+#### Docker Files
+
+- `Dockerfile`: Docker image definition
+- `build_docker.sh`: Script to build the Docker image
+- `docker_run.sh`: Script to run the agent in Docker
+- `docker-compose.yml`: Docker Compose configuration
+- `env.example`: Environment variables template
 
 ## Package Contents
 

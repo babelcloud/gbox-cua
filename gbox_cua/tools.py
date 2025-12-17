@@ -19,6 +19,7 @@ PERFORM_ACTION_TOOL = {
 Supported action types:
 - click: Click on an element. Options: "left", "right", "double"
 - swipe: Swipe from one element to another
+- drag: Drag an element to another position
 - scroll: Scroll in a direction (up, down, left, right) with optional distance
 - input: Type text into an element
 - key_press: Press one or more keys

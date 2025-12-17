@@ -1,17 +1,28 @@
 version: '3.8'
 
 services:
-  gbox-cua-agent:
+  gbox-cua:
     build: .
-    image: gbox-cua-agent:latest
+    image: gbox-cua:latest
     environment:
       - GBOX_API_KEY=${GBOX_API_KEY}
-      - VLM_PROVIDER=${VLM_PROVIDER:-vllm}
+      - VLM_PROVIDER=${VLM_PROVIDER:-openai}
       - VLLM_API_BASE=${VLLM_API_BASE}
+      - VLLM_API_KEY=${VLLM_API_KEY:-EMPTY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_API_BASE=${OPENROUTER_API_BASE:-https://openrouter.ai/api/v1}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_BASE=${OPENAI_API_BASE:-https://api.openai.com/v1}
+      - MODEL_NAME=${MODEL_NAME:-gpt-4o}
+      - MAX_TOKENS=${MAX_TOKENS:-2048}
+      - TEMPERATURE=${TEMPERATURE:-0.7}
+      - TOP_P=${TOP_P:-0.9}
+      - MAX_TURNS=${MAX_TURNS:-20}
+      - BOX_TYPE=${BOX_TYPE:-android}
+      - TASK=${TASK:-Open the Settings app}
     volumes:
       - ./logs:/app/logs
-    command: gbox-cua-agent "${TASK:-Open the Settings app}" --verbose
+    command: gbox-cua "${TASK:-Open the Settings app}" --verbose
     restart: unless-stopped
+    network_mode: host
 
