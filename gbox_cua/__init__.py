@@ -17,6 +17,8 @@ from gbox_cua.prompts import (
     create_user_message_with_screenshot,
 )
 from gbox_cua.gbox_coordinate import GBoxCoordinateGenerator
+from gbox_cua.gbox_client import GBoxClient
+from gbox_cua.vlm_inference import VLMInference
 
 __version__ = "0.1.0"
 
@@ -29,5 +31,7 @@ __all__ = [
     "create_system_prompt",
     "create_user_message_with_screenshot",
     "GBoxCoordinateGenerator",
+    "GBoxClient",
+    "VLMInference",
 ]
 

@@ -1,0 +1,693 @@
+"""GBox API Client for box management and UI actions using official SDK.
+
+This module provides a complete GBox client that can be used by both
+rl-cua and OSWorld-provider implementations.
+"""
+
+import base64
+import binascii
+import json
+import logging
+from typing import Optional, Dict, Any, List, Tuple
+
+try:
+    from gbox_sdk import GboxSDK
+except ImportError:
+    GboxSDK = None
+    logging.warning("gbox_sdk not installed. Install with: pip install gbox-sdk")
+
+from gbox_cua.gbox_coordinate import GBoxCoordinateGenerator
+
+# Type alias for SDK response
+ResponseDict = Dict[str, Any]
+
+logger = logging.getLogger(__name__)
+
+
+class GBoxClient:
+    """Client for interacting with GBox API using official SDK.
+    
+    Handles:
+    - Box creation and termination
+    - Screenshot capture
+    - UI actions (click, swipe, scroll, type, key press, button press, drag)
+    - Coordinate generation using gbox-handy-1 model (via gbox-cua)
+    """
+    
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gbox-handy-1",
+        box_type: str = "android",
+        timeout: str = "60s",
+        wait: bool = True,
+        expires_in: str = "15m",
+        labels: Optional[Dict[str, Any]] = None,
+        envs: Optional[Dict[str, Any]] = None,
+    ):
+        """Initialize GBox client.
+        
+        Args:
+            api_key: GBox API key
+            model: Model name for coordinate generation (default: gbox-handy-1)
+            box_type: Default box type ("android" or "linux")
+            timeout: Box creation timeout (e.g., "60s")
+            wait: Whether to wait for box to be ready
+            expires_in: Box expiration time (e.g., "15m")
+            labels: Optional labels for box
+            envs: Optional environment variables for box
+        """
+        if GboxSDK is None:
+            raise ImportError("gbox_sdk not installed. Install with: pip install gbox-sdk")
+        
+        self.api_key = api_key
+        self.model = model
+        self.box_type = box_type
+        self.timeout = timeout
+        self.wait = wait
+        self.expires_in = expires_in
+        self.labels = labels or {}
+        self.envs = envs or {}
+        
+        self.box_id: Optional[str] = None
+        self._sdk = GboxSDK(api_key=api_key)
+        self._box: Optional[Any] = None  # Box resource object
+        
+        # Use shared coordinate generator from gbox-cua
+        self._coord_generator = GBoxCoordinateGenerator(
+            api_key=api_key,
+            model=model
+        )
+    
+    def _parse_response(self, response) -> Dict[str, Any]:
+        """Parse SDK response to dictionary.
+        
+        Args:
+            response: SDK response object
+            
+        Returns:
+            Dictionary representation of response
+        """
+        if hasattr(response, 'json'):
+            return response.json()
+        elif hasattr(response, 'data'):
+            if hasattr(response.data, 'model_dump'):
+                return response.data.model_dump()
+            elif hasattr(response.data, 'dict'):
+                return response.data.dict()
+            else:
+                return dict(response.data) if hasattr(response.data, '__dict__') else response.data
+        elif hasattr(response, 'model_dump'):
+            return response.model_dump()
+        elif hasattr(response, 'dict'):
+            return response.dict()
+        else:
+            return dict(response) if isinstance(response, dict) else {"response": response}
+    
+    async def create_box(self, box_type: Optional[str] = None) -> Dict[str, Any]:
+        """Create a new GBox environment.
+        
+        Args:
+            box_type: Type of box ("android" or "linux"), defaults to self.box_type
+            
+        Returns:
+            Box creation response
+        """
+        box_type = box_type or self.box_type
+        logger.debug(f"Creating {box_type} box...")
+        
+        try:
+            # Create box using SDK - according to official docs
+            # https://docs.gbox.ai/api-reference/box/create-android-box
+            # Note: SDK create() is synchronous, not async
+            box_response = self._sdk.create(
+                type=box_type,
+                wait=self.wait,
+                timeout=self.timeout,
+                config={
+                    "expiresIn": self.expires_in,
+                    **({"labels": self.labels} if self.labels else {}),
+                    **({"envs": self.envs} if self.envs else {}),
+                }
+            )
+            
+            # Store box response
+            self._box = box_response
+            # Get box ID from response.data.id (according to official example)
+            if hasattr(box_response, 'data') and hasattr(box_response.data, 'id'):
+                self.box_id = box_response.data.id
+            elif hasattr(box_response, 'id'):
+                self.box_id = box_response.id
+            elif isinstance(box_response, dict):
+                self.box_id = box_response.get("id") or (box_response.get("data", {}).get("id") if isinstance(box_response.get("data"), dict) else None)
+            else:
+                raise ValueError(f"Unexpected box response format: {type(box_response)}")
+            
+            if not self.box_id:
+                raise ValueError("Failed to extract box ID from response")
+            
+            logger.debug(f"Box created: {self.box_id}")
+            return {"id": self.box_id}
+            
+        except Exception as e:
+            logger.error(f"Failed to create {box_type} box: {e}")
+            raise RuntimeError(
+                f"Cannot create GBox. Please check:\n"
+                f"  1. API key is valid\n"
+                f"  2. Network connectivity\n"
+                f"  3. Box type is supported: {box_type}"
+            ) from e
+    
+    async def terminate_box(self, box_id: Optional[str] = None) -> Dict[str, Any]:
+        """Terminate a GBox environment.
+        
+        Args:
+            box_id: Box ID to terminate, defaults to current box
+            
+        Returns:
+            Termination response
+        """
+        box_id = box_id or self.box_id
+        if not box_id:
+            raise ValueError("No box ID provided")
+        
+        logger.debug(f"Terminating box: {box_id}")
+        
+        try:
+            # Use SDK terminate method if available, otherwise use DELETE endpoint
+            if hasattr(self._sdk, 'terminate'):
+                result = self._sdk.terminate(box_id)
+            else:
+                # Use DELETE endpoint: DELETE /boxes/{boxId}
+                result = self._sdk.client.delete(
+                    f"/boxes/{box_id}",
+                    cast_to=ResponseDict
+                )
+            result_dict = self._parse_response(result) if result else {"id": box_id, "status": "terminated"}
+            
+            if box_id == self.box_id:
+                self.box_id = None
+                self._box = None
+            
+            return result_dict
+        except Exception as e:
+            logger.error(f"Failed to terminate box: {e}")
+            raise
+    
+    async def get_box(self, box_id: Optional[str] = None) -> Dict[str, Any]:
+        """Get box information.
+        
+        Args:
+            box_id: Box ID, defaults to current box
+            
+        Returns:
+            Box information
+        """
+        box_id = box_id or self.box_id
+        if not box_id:
+            raise ValueError("No box ID provided")
+        
+        try:
+            result = self._sdk.client.get(f"/boxes/{box_id}", cast_to=ResponseDict)
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to get box info: {e}")
+            raise
+    
+    async def take_screenshot(
+        self,
+        box_id: Optional[str] = None,
+        format: str = "png",
+    ) -> Tuple[bytes, str]:
+        """Take a screenshot of the box display.
+        
+        Args:
+            box_id: Box ID, defaults to current box
+            format: Image format ("png" or "jpeg")
+            
+        Returns:
+            Tuple of (image_bytes, base64_data_uri)
+        """
+        box_id = box_id or self.box_id
+        if not box_id:
+            raise ValueError("No box ID provided")
+        
+        try:
+            # Use SDK client to call screenshot API
+            # According to docs: POST /boxes/{boxId}/actions/screenshot
+            screenshot_result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/screenshot",
+                cast_to=ResponseDict,
+                body={"format": format}
+            )
+            
+            # Handle screenshot result - SDK returns dict directly when cast_to=ResponseDict
+            result_data = screenshot_result if isinstance(screenshot_result, dict) else self._parse_response(screenshot_result)
+            
+            # Extract screenshot data from response
+            # Response format: {"screenshot": "data:image/png;base64,..."} or {"uri": "https://..."}
+            screenshot_data = None
+            if isinstance(result_data, dict):
+                screenshot_data = (
+                    result_data.get("uri") or  # Most common format
+                    result_data.get("screenshot") or 
+                    result_data.get("url") or
+                    (result_data.get("data", {}).get("uri") if isinstance(result_data.get("data"), dict) else None) or
+                    (result_data.get("data", {}).get("screenshot") if isinstance(result_data.get("data"), dict) else None)
+                )
+            
+            if not screenshot_data or (isinstance(screenshot_data, str) and not screenshot_data.strip()):
+                logger.error(f"Unexpected screenshot response format: {result_data}")
+                raise ValueError(f"Failed to extract screenshot from response: {result_data}")
+            
+            # Convert to bytes and data URI
+            if isinstance(screenshot_data, str):
+                if screenshot_data.startswith("data:"):
+                    # Base64 data URI
+                    try:
+                        parts = screenshot_data.split(",", 1)
+                        if len(parts) != 2:
+                            raise ValueError(f"Invalid data URI format: {screenshot_data[:50]}...")
+                        _, data = parts
+                        image_bytes = base64.b64decode(data)
+                        return image_bytes, screenshot_data
+                    except (ValueError, base64.binascii.Error) as e:
+                        logger.error(f"Failed to parse data URI: {e}, data length: {len(screenshot_data)}")
+                        raise ValueError(f"Invalid data URI format: {screenshot_data[:50]}...")
+                else:
+                    # HTTP URL - fetch the image
+                    import httpx
+                    async with httpx.AsyncClient() as client:
+                        img_response = await client.get(screenshot_data)
+                        img_response.raise_for_status()
+                        image_bytes = img_response.content
+                        base64_data = base64.b64encode(image_bytes).decode()
+                        data_uri = f"data:image/{format};base64,{base64_data}"
+                        return image_bytes, data_uri
+            
+            raise ValueError(f"Unexpected screenshot data type: {type(screenshot_data)}, value: {str(screenshot_data)[:100]}")
+            
+        except Exception as e:
+            logger.error(f"Failed to take screenshot: {e}", exc_info=True)
+            raise
+    
+    async def generate_coordinates(
+        self,
+        screenshot_uri: str,
+        action_type: str,
+        target: str,
+        end_target: Optional[str] = None,
+        direction: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Generate coordinates using gbox-handy-1 model.
+        
+        This method uses the shared GBoxCoordinateGenerator from gbox-cua package.
+        
+        Args:
+            screenshot_uri: Screenshot as base64 data URI or HTTP URL
+            action_type: Type of action ("click", "drag", "scroll")
+            target: Target element description
+            end_target: End target for drag actions
+            direction: Direction for scroll actions
+            
+        Returns:
+            Coordinate generation response (format: {"response": {"coordinates": {...}}})
+        """
+        try:
+            # Use shared coordinate generator from gbox-cua
+            result = await self._coord_generator.generate_coordinates(
+                screenshot_uri=screenshot_uri,
+                action_type=action_type,
+                target=target,
+                end_target=end_target,
+                direction=direction,
+            )
+            
+            # Ensure response format is consistent with existing code expectations
+            # Existing code expects: result.get("response", {}).get("coordinates", {})
+            if "response" not in result and "coordinates" in result:
+                # If coordinates are at top level, wrap in response structure
+                return {"response": result}
+            elif "response" in result:
+                # Already has response structure
+                return result
+            else:
+                # Wrap in response structure for consistency
+                return {"response": result}
+                
+        except Exception as e:
+            logger.error(f"Failed to generate coordinates: {e}")
+            raise
+    
+    async def click(
+        self,
+        x: int,
+        y: int,
+        button: str = "left",
+        double_click: bool = False,
+        box_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Perform a click action.
+        
+        Args:
+            x: X coordinate
+            y: Y coordinate
+            button: Button type ("left", "right", "middle")
+            double_click: Whether to double click
+            box_id: Box ID, defaults to current box
+            
+        Returns:
+            Action response
+        """
+        box_id = box_id or self.box_id
+        if not box_id:
+            raise ValueError("No box ID provided")
+        
+        try:
+            payload = {"x": x, "y": y, "button": button}
+            if double_click:
+                payload["doubleClick"] = True
+            
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/click",
+                cast_to=ResponseDict,
+                body=payload
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to click: {e}")
+            raise
+    
+    async def tap(
+        self,
+        x: int,
+        y: int,
+        box_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Perform a tap action (for touch screens).
+        
+        Args:
+            x: X coordinate
+            y: Y coordinate
+            box_id: Box ID, defaults to current box
+            
+        Returns:
+            Action response
+        """
+        box_id = box_id or self.box_id
+        if not box_id:
+            raise ValueError("No box ID provided")
+        
+        try:
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/tap",
+                cast_to=ResponseDict,
+                body={"x": x, "y": y}
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to tap: {e}")
+            raise
+    
+    async def swipe(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        duration: int = 300,
+        box_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Perform a swipe action.
+        
+        Args:
+            start_x: Start X coordinate
+            start_y: Start Y coordinate
+            end_x: End X coordinate
+            end_y: End Y coordinate
+            duration: Swipe duration in ms
+            box_id: Box ID, defaults to current box
+            
+        Returns:
+            Action response
+        """
+        box_id = box_id or self.box_id
+        if not box_id:
+            raise ValueError("No box ID provided")
+        
+        try:
+            # GBox API expects start/end as objects and duration as string
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/swipe",
+                cast_to=ResponseDict,
+                body={
+                    "start": {
+                        "x": start_x,
+                        "y": start_y,
+                    },
+                    "end": {
+                        "x": end_x,
+                        "y": end_y,
+                    },
+                    "duration": f"{duration}ms",  # Duration must be a string like "300ms"
+                }
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to swipe: {e}")
+            raise
+    
+    async def scroll(
+        self,
+        x: int,
+        y: int,
+        direction: str = "down",
+        distance: int = 300,
+        box_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Perform a scroll action.
+        
+        Args:
+            x: X coordinate of scroll center
+            y: Y coordinate of scroll center
+            direction: Scroll direction ("up", "down", "left", "right")
+            distance: Scroll distance in pixels
+            box_id: Box ID, defaults to current box
+            
+        Returns:
+            Action response
+        """
+        box_id = box_id or self.box_id
+        if not box_id:
+            raise ValueError("No box ID provided")
+        
+        try:
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/scroll",
+                cast_to=ResponseDict,
+                body={
+                    "x": x,
+                    "y": y,
+                    "direction": direction,
+                    "distance": distance,
+                }
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to scroll: {e}")
+            raise
+    
+    async def type_text(
+        self,
+        text: str,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+        box_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Type text into the focused element or at coordinates.
+        
+        Args:
+            text: Text to type
+            x: Optional X coordinate to click first
+            y: Optional Y coordinate to click first
+            box_id: Box ID, defaults to current box
+            
+        Returns:
+            Action response
+        """
+        box_id = box_id or self.box_id
+        if not box_id:
+            raise ValueError("No box ID provided")
+        
+        try:
+            params = {"text": text}
+            if x is not None and y is not None:
+                params["x"] = x
+                params["y"] = y
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/type",
+                cast_to=ResponseDict,
+                body=params
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to type text: {e}")
+            raise
+    
+    async def press_key(
+        self,
+        keys: List[str],
+        box_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Press one or more keys.
+        
+        Args:
+            keys: List of key names to press (e.g., ["Enter"], ["Ctrl", "A"])
+            box_id: Box ID, defaults to current box
+            
+        Returns:
+            Action response
+        """
+        box_id = box_id or self.box_id
+        if not box_id:
+            raise ValueError("No box ID provided")
+        
+        try:
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/key",
+                cast_to=ResponseDict,
+                body={"keys": keys}
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to press key: {e}")
+            raise
+    
+    async def press_button(
+        self,
+        button: str,
+        box_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Press a device button (Android).
+        
+        Args:
+            button: Button name ("back", "home", "menu")
+            box_id: Box ID, defaults to current box
+            
+        Returns:
+            Action response
+        """
+        box_id = box_id or self.box_id
+        if not box_id:
+            raise ValueError("No box ID provided")
+        
+        # Map button names to Android key codes
+        # If button endpoint doesn't exist, use key press as fallback
+        button_to_key = {
+            "back": "KEYCODE_BACK",
+            "home": "KEYCODE_HOME",
+            "menu": "KEYCODE_MENU",
+        }
+        
+        try:
+            # Try button endpoint first
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/button",
+                cast_to=ResponseDict,
+                body={"button": button}
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            # If button endpoint doesn't exist (404), fall back to key press
+            error_str = str(e).lower()
+            status_code = None
+            if hasattr(e, 'status_code'):
+                status_code = e.status_code
+            elif hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                status_code = e.response.status_code
+            
+            if status_code == 404 or "404" in error_str or "not found" in error_str:
+                logger.warning(f"Button endpoint not found (404), using key press for {button}")
+                key_code = button_to_key.get(button.lower(), "KEYCODE_HOME")
+                return await self.press_key(keys=[key_code], box_id=box_id)
+            else:
+                logger.error(f"Failed to press button: {e}")
+                raise
+    
+    async def drag(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        duration: int = 500,
+        box_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Perform a drag action.
+        
+        Args:
+            start_x: Start X coordinate
+            start_y: Start Y coordinate
+            end_x: End X coordinate
+            end_y: End Y coordinate
+            duration: Drag duration in ms
+            box_id: Box ID, defaults to current box
+            
+        Returns:
+            Action response
+        """
+        box_id = box_id or self.box_id
+        if not box_id:
+            raise ValueError("No box ID provided")
+        
+        try:
+            # GBox API expects start/end as objects and duration as string
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/drag",
+                cast_to=ResponseDict,
+                body={
+                    "start": {
+                        "x": start_x,
+                        "y": start_y,
+                    },
+                    "end": {
+                        "x": end_x,
+                        "y": end_y,
+                    },
+                    "duration": f"{duration}ms",  # Duration must be a string like "500ms"
+                }
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to drag: {e}")
+            raise
+    
+    async def close(self):
+        """Close the SDK client."""
+        # SDK handles cleanup automatically
+        if self._box:
+            try:
+                await self.terminate_box()
+            except Exception as e:
+                logger.warning(f"Failed to terminate box on close: {e}")
+        self._box = None
+    
+    async def __aenter__(self):
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.box_id:
+            try:
+                await self.terminate_box()
+            except Exception as e:
+                logger.error(f"Failed to terminate box on exit: {e}")
+        await self.close()
+
