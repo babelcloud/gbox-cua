@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  gbox-cua-agent:
+    build: .
+    image: gbox-cua-agent:latest
+    environment:
+      - GBOX_API_KEY=${GBOX_API_KEY}
+      - VLM_PROVIDER=${VLM_PROVIDER:-vllm}
+      - VLLM_API_BASE=${VLLM_API_BASE}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./logs:/app/logs
+    command: gbox-cua-agent "${TASK:-Open the Settings app}" --verbose
+    restart: unless-stopped
+

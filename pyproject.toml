@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gbox-cua"
+version = "0.1.0"
+description = "GBox CUA Agent - Can be used as standalone agent or imported as library"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "gbox-sdk",
+    "httpx>=0.25.0",
+    "Pillow>=10.0.0",
+]
+
+[project.scripts]
+gbox-cua = "gbox_cua.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "flake8",
+]
+
