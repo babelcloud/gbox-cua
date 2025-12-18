@@ -683,7 +683,13 @@ class StandaloneGBoxCUAAgent:
         logger.info("="*60)
         
         # Create box
-        await self.gbox_client.create_box(box_type=box_type)
+        box_create_start = time.time()
+        box_info = await self.gbox_client.create_box(box_type=box_type)
+        box_create_time = time.time() - box_create_start
+        box_id = (box_info or {}).get("id") or getattr(self.gbox_client, "box_id", None)
+        logger.info(f"Box created: id={box_id}, took {box_create_time:.3f}s")
+        if verbose:
+            print(f"Box created: id={box_id}, took {box_create_time:.3f}s")
         
         # Initialize conversation
         system_prompt = create_system_prompt(task_description, max_turns=self.max_turns)
