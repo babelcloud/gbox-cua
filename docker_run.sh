@@ -19,16 +19,26 @@ IMAGE_TAG="latest"
 CONTAINER_NAME="gbox-cua-container"
 
 # Load environment variables from .env file
+# 1) Prefer .env in this repo (SCRIPT_DIR/.env)
+# 2) Fallback to parent directory .env (useful when sharing config with a parent project)
 ENV_FILE="$SCRIPT_DIR/.env"
+PARENT_ENV_FILE="$(cd "$SCRIPT_DIR/.." && pwd)/.env"
+
 if [ -f "$ENV_FILE" ]; then
     echo -e "${GREEN}Loading environment variables from $ENV_FILE${NC}"
-    # Use a safer method to load .env file that handles values with spaces
     set -a
+    # shellcheck disable=SC1090
     source "$ENV_FILE"
     set +a
+elif [ -f "$PARENT_ENV_FILE" ]; then
+    echo -e "${GREEN}Loading environment variables from parent $PARENT_ENV_FILE${NC}"
+    set -a
+    # shellcheck disable=SC1090
+    source "$PARENT_ENV_FILE"
+    set +a
 else
-    echo -e "${YELLOW}Warning: .env file not found at $ENV_FILE${NC}"
-    echo -e "${YELLOW}Please copy env.example to .env and configure it:${NC}"
+    echo -e "${YELLOW}Warning: .env file not found at $ENV_FILE or $PARENT_ENV_FILE${NC}"
+    echo -e "${YELLOW}Please copy env.example to .env and configure it in this repo:${NC}"
     echo -e "${YELLOW}  cp $SCRIPT_DIR/env.example $SCRIPT_DIR/.env${NC}"
     echo ""
     echo -e "${YELLOW}Continuing with environment variables from current shell...${NC}"

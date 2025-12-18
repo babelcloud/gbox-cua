@@ -172,17 +172,25 @@ class GBoxClient:
             raise ValueError("No box ID provided")
         
         logger.debug(f"Terminating box: {box_id}")
-        
+
         try:
-            # Use SDK terminate method if available, otherwise use DELETE endpoint
-            if hasattr(self._sdk, 'terminate'):
+            # Prefer official terminate API:
+            #   POST /boxes/{boxId}/terminate  (see https://docs.gbox.ai/api-reference/box/terminate-box)
+            # If future versions of gbox-sdk expose a high-level terminate() helper we
+            # still try to use it first, but fall back to the documented HTTP endpoint.
+
+            # 1) If SDK has terminate helper, use it
+            if hasattr(self._sdk, "terminate"):
                 result = self._sdk.terminate(box_id)
             else:
-                # Use DELETE endpoint: DELETE /boxes/{boxId}
-                result = self._sdk.client.delete(
-                    f"/boxes/{box_id}",
-                    cast_to=ResponseDict
+                # 2) Fallback to HTTP endpoint: POST /boxes/{boxId}/terminate
+                # The API accepts an optional JSON body: {"wait": true}
+                result = self._sdk.client.post(
+                    f"/boxes/{box_id}/terminate",
+                    cast_to=ResponseDict,
+                    body={"wait": True},
                 )
+
             result_dict = self._parse_response(result) if result else {"id": box_id, "status": "terminated"}
             
             if box_id == self.box_id:

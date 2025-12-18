@@ -622,14 +622,19 @@ class GBoxClient:
         if self.box_id:
             box_id = self.box_id
             try:
-                # Try SDK terminate method first if available
-                if hasattr(self._sdk, 'terminate'):
+                # Prefer official terminate API:
+                #   POST /boxes/{boxId}/terminate  (see https://docs.gbox.ai/api-reference/box/terminate-box)
+                # If SDK exposes terminate(), use it; otherwise call the documented endpoint.
+                if hasattr(self._sdk, "terminate"):
                     self._sdk.terminate(box_id)
                     logger.debug(f"Box terminated via SDK: {box_id}")
                 else:
-                    # Fall back to DELETE endpoint
-                    self._sdk.client.delete(f"/boxes/{box_id}", cast_to=Dict[str, Any])
-                    logger.debug(f"Box terminated via DELETE: {box_id}")
+                    self._sdk.client.post(
+                        f"/boxes/{box_id}/terminate",
+                        cast_to=Dict[str, Any],
+                        body={"wait": True},
+                    )
+                    logger.debug(f"Box terminated via POST /boxes/{box_id}/terminate")
             except Exception as e:
                 # Check if it's a 404 error (box already terminated/deleted)
                 error_str = str(e)
