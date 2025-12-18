@@ -244,6 +244,20 @@ class VLMInference:
             raise RuntimeError(
                 f"{provider_name} API error: {e.response.status_code}{error_detail}"
             ) from e
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout) as e:
+            provider_name = "OpenRouter" if self.provider == "openrouter" else "vLLM"
+            logger.error(
+                f"{provider_name} connection error: {e}. "
+                f"Please check if the {provider_name} server is running and accessible at {self.api_base}"
+            )
+            raise RuntimeError(
+                f"{provider_name} connection error: {e}. "
+                f"Server may be down or unreachable at {self.api_base}"
+            ) from e
+        except httpx.RequestError as e:
+            provider_name = "OpenRouter" if self.provider == "openrouter" else "vLLM"
+            logger.error(f"{provider_name} request error: {e}")
+            raise RuntimeError(f"{provider_name} request error: {e}") from e
         
         result = response.json()
         return result
