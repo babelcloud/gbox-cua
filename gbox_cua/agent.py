@@ -606,11 +606,57 @@ class GBoxClient:
     async def terminate_box(self):
         """Terminate the box."""
         if self.box_id:
+            box_id = self.box_id
             try:
-                self._sdk.client.delete(f"/boxes/{self.box_id}", cast_to=Dict[str, Any])
-                logger.debug(f"Box terminated: {self.box_id}")
+                # Try SDK terminate method first if available
+                if hasattr(self._sdk, 'terminate'):
+                    self._sdk.terminate(box_id)
+                    logger.debug(f"Box terminated via SDK: {box_id}")
+                else:
+                    # Fall back to DELETE endpoint
+                    self._sdk.client.delete(f"/boxes/{box_id}", cast_to=Dict[str, Any])
+                    logger.debug(f"Box terminated via DELETE: {box_id}")
             except Exception as e:
-                logger.warning(f"Failed to terminate box: {e}")
+                # Check if it's a 404 error (box already terminated/deleted)
+                error_str = str(e)
+                error_str_lower = error_str.lower()
+                status_code = None
+                
+                # Try to extract status code from exception attributes
+                if hasattr(e, 'status_code'):
+                    status_code = e.status_code
+                elif hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                    status_code = e.response.status_code
+                elif hasattr(e, 'code'):
+                    status_code = e.code
+                elif hasattr(e, 'statusCode'):
+                    status_code = e.statusCode
+                
+                # Try to extract from error message/dict if it's formatted as "Error code: 404"
+                if status_code is None:
+                    import re
+                    match = re.search(r'Error code:\s*(\d+)', error_str, re.IGNORECASE)
+                    if match:
+                        try:
+                            status_code = int(match.group(1))
+                        except ValueError:
+                            pass
+                
+                # Check error message for 404 indicators (more comprehensive)
+                is_404 = (
+                    status_code == 404 or
+                    "404" in error_str or
+                    "not found" in error_str_lower or
+                    "cannot delete" in error_str_lower or
+                    "'statuscode': 404" in error_str_lower or
+                    '"statuscode": 404' in error_str_lower
+                )
+                
+                if is_404:
+                    logger.debug(f"Box {box_id} already terminated or not found (404) - this is expected if box was auto-terminated")
+                else:
+                    # Only log as warning if it's not a 404 - don't let this mask other errors
+                    logger.debug(f"Failed to terminate box {box_id}: {e} (non-critical)")
             finally:
                 self.box_id = None
 
@@ -736,11 +782,16 @@ class StandaloneGBoxCUAAgent:
                 
                 # Call VLM (pass image_data separately, like rl-cua)
                 vlm_start = time.time()
-                vlm_response = await self.vlm.generate(
-                    messages=self.conversation,
-                    tools=self.tools,
-                    image_data=screenshot_bytes,  # Pass image bytes, not URI
-                )
+                try:
+                    vlm_response = await self.vlm.generate(
+                        messages=self.conversation,
+                        tools=self.tools,
+                        image_data=screenshot_bytes,  # Pass image bytes, not URI
+                    )
+                except Exception as e:
+                    vlm_time = time.time() - vlm_start
+                    logger.error(f"[Turn {turn + 1}] VLM call failed after {vlm_time:.3f}s: {e}", exc_info=True)
+                    raise
                 vlm_time = time.time() - vlm_start
                 
                 # Parse response (vlm_response is now a dict from response.json())
@@ -833,9 +884,18 @@ class StandaloneGBoxCUAAgent:
                 result_message = f"Task not completed within {self.max_turns} turns"
                 logger.warning(f"Task incomplete: {result_message}")
         
+        except Exception as e:
+            # Log the exception before cleanup
+            logger.error(f"Task execution failed: {e}", exc_info=True)
+            result_message = f"Task failed with error: {str(e)}"
+            raise
         finally:
-            # Terminate box
-            await self.gbox_client.terminate_box()
+            # Terminate box (errors here are non-critical and won't mask original errors)
+            try:
+                await self.gbox_client.terminate_box()
+            except Exception as cleanup_error:
+                # Log but don't raise - we don't want cleanup errors to mask the original error
+                logger.debug(f"Error during box cleanup (non-critical): {cleanup_error}")
         
         result = {
             "task_completed": task_completed,
