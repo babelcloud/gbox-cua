@@ -532,6 +532,7 @@ class GBoxAgentCore:
             success = any(kw in lower_text for kw in ["success", "successfully", "accomplished"])
             return {
                 "id": f"call_{turn}_complete",
+                "type": "function",
                 "function": {
                     "name": "report_task_complete",
                     "arguments": json.dumps({
@@ -544,6 +545,7 @@ class GBoxAgentCore:
         # Default: couldn't parse, return task_complete with failure
         return {
             "id": f"call_{turn}_parse_failed",
+            "type": "function",
             "function": {
                 "name": "report_task_complete",
                 "arguments": json.dumps({
@@ -555,11 +557,20 @@ class GBoxAgentCore:
     
     @staticmethod
     def _normalize_tool_call(data: Dict[str, Any], turn: int) -> Dict[str, Any]:
-        """Normalize parsed data to tool call format."""
+        """Normalize parsed data to tool call format.
+        
+        Returns a tool_call dict compatible with OpenAI/vLLM format:
+        {
+            "id": "call_xxx",
+            "type": "function",
+            "function": {"name": "...", "arguments": "..."}
+        }
+        """
         # If already has 'function' field
         if "function" in data:
             return {
                 "id": data.get("id", f"call_{turn}"),
+                "type": "function",
                 "function": data["function"],
             }
         
@@ -570,6 +581,7 @@ class GBoxAgentCore:
                 arguments = json.dumps(arguments)
             return {
                 "id": f"call_{turn}",
+                "type": "function",
                 "function": {
                     "name": data["name"],
                     "arguments": arguments,
@@ -580,6 +592,7 @@ class GBoxAgentCore:
         if "action_type" in data:
             return {
                 "id": f"call_{turn}",
+                "type": "function",
                 "function": {
                     "name": "perform_action",
                     "arguments": json.dumps(data),
@@ -589,6 +602,7 @@ class GBoxAgentCore:
         # Default: wrap as perform_action
         return {
             "id": f"call_{turn}",
+            "type": "function",
             "function": {
                 "name": "perform_action",
                 "arguments": json.dumps(data),
