@@ -96,9 +96,15 @@ DOCKER_ARGS=(
     run
     --name "$CONTAINER_NAME"
     --rm
-    -it
     --network host
 )
+
+# Add interactive/TTY flags only if running in a terminal
+if [ -t 0 ] && [ -t 1 ]; then
+    DOCKER_ARGS+=(-it)
+else
+    DOCKER_ARGS+=(-i)
+fi
 
 # Add environment variables
 DOCKER_ARGS+=(-e GBOX_API_KEY="${GBOX_API_KEY}")
