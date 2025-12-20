@@ -35,6 +35,36 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 @dataclass
+class CoordinateCallLog:
+    """Log for a single coordinate API call."""
+    action_type: str  # click, drag, scroll
+    target: str  # target description
+    duration: float = 0.0  # seconds
+    success: bool = True
+    error: str = ""
+    coordinates: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ActionTimingBreakdown:
+    """Detailed timing breakdown for action execution."""
+    # Coordinate API calls
+    coordinate_calls: List[CoordinateCallLog] = field(default_factory=list)
+    total_coordinate_time: float = 0.0
+    
+    # GBox API calls (click, swipe, scroll, etc.)
+    gbox_api_time: float = 0.0
+    gbox_api_action: str = ""
+    
+    # Pre-action delay (sleep before action)
+    pre_action_delay: float = 0.0
+    
+    @property
+    def num_coordinate_calls(self) -> int:
+        return len(self.coordinate_calls)
+
+
+@dataclass
 class TurnLog:
     """Log for a single turn in the rollout."""
     turn_number: int
@@ -70,6 +100,9 @@ class TurnLog:
     action_success: bool = False
     action_error: str = ""
     action_result: Dict[str, Any] = field(default_factory=dict)
+    
+    # Detailed action timing breakdown
+    action_timing: Optional[ActionTimingBreakdown] = None
     
     # Task completion (if applicable)
     task_completed: bool = False
@@ -355,11 +388,34 @@ class RolloutLogger:
                     except Exception:
                         pass
             
-            # Action Execution Result
+            # Action Execution Result with Timing Breakdown
             if turn.action_type:
                 w(self._make_line("", W))
                 status = "OK" if turn.action_success else "FAILED"
                 w(self._make_line(f"[Action Result] {turn.action_type} - {status} ({self._format_duration(turn.action_time)})", W))
+                
+                # Detailed timing breakdown
+                if turn.action_timing:
+                    timing = turn.action_timing
+                    w(self._make_line(f"  ┌─ Timing Breakdown ─────────────────────────────────────────┐", W))
+                    
+                    # Coordinate API calls
+                    if timing.coordinate_calls:
+                        w(self._make_line(f"  │ Coordinate API: {len(timing.coordinate_calls)} call(s), total {self._format_duration(timing.total_coordinate_time)}", W))
+                        for i, call in enumerate(timing.coordinate_calls):
+                            call_status = "✓" if call.success else "✗"
+                            target_short = call.target[:40] + "..." if len(call.target) > 40 else call.target
+                            w(self._make_line(f"  │   [{i+1}] {call.action_type} {call_status} {self._format_duration(call.duration)}: {target_short}", W))
+                            if call.error:
+                                w(self._make_line(f"  │       Error: {call.error[:50]}", W))
+                    else:
+                        w(self._make_line(f"  │ Coordinate API: 0 calls (no coordinate needed)", W))
+                    
+                    # GBox API call
+                    if timing.gbox_api_time > 0:
+                        w(self._make_line(f"  │ GBox API ({timing.gbox_api_action}): {self._format_duration(timing.gbox_api_time)}", W))
+                    
+                    w(self._make_line(f"  └──────────────────────────────────────────────────────────────┘", W))
                 
                 if turn.action_error:
                     error_text = self._truncate_text(turn.action_error, 68)
@@ -453,6 +509,12 @@ class GBoxAgentCore:
         self.max_turns = max_turns
         self.context_window = context_window
         self.tools_schema = get_tools_schema()
+        
+        # Cache coordinate generator to avoid recreating on every action
+        self._coord_generator = GBoxCoordinateGenerator(
+            api_key=gbox_client.api_key,
+            model=getattr(gbox_client, 'model', 'gbox-handy-1')
+        )
     
     @staticmethod
     def extract_thinking_and_content(raw_content: str) -> Tuple[str, str]:
@@ -631,7 +693,7 @@ class GBoxAgentCore:
         self,
         tool_call: Dict[str, Any],
         screenshot_uri: str,
-    ) -> Tuple[Dict[str, Any], bool, bool]:
+    ) -> Tuple[Dict[str, Any], bool, bool, Optional[ActionTimingBreakdown]]:
         """Execute a parsed tool call.
         
         Args:
@@ -639,7 +701,7 @@ class GBoxAgentCore:
             screenshot_uri: Current screenshot URI for coordinate generation
             
         Returns:
-            Tuple of (result_dict, is_done, is_success)
+            Tuple of (result_dict, is_done, is_success, timing_breakdown)
         """
         func_name = tool_call.get("function", {}).get("name", "")
         func_args_str = tool_call.get("function", {}).get("arguments", "{}")
@@ -653,13 +715,13 @@ class GBoxAgentCore:
         if func_name == "report_task_complete":
             success = func_args.get("success", False)
             message = func_args.get("result_message", "")
-            return {"status": "complete", "success": success, "message": message}, True, success
+            return {"status": "complete", "success": success, "message": message}, True, success, None
         
         # Handle sleep
         if func_name == "sleep":
             duration = func_args.get("duration", 1.0)
             await asyncio.sleep(duration)
-            return {"status": "success", "action": "sleep", "duration": duration}, False, False
+            return {"status": "success", "action": "sleep", "duration": duration}, False, False, None
         
         # Handle perform_action
         if func_name == "perform_action":
@@ -670,61 +732,104 @@ class GBoxAgentCore:
         
         # Execute the action
         try:
-            result = await self.execute_action(action_dict, screenshot_uri)
-            return {"status": "success", **result}, False, False
+            result, timing = await self.execute_action(action_dict, screenshot_uri)
+            return {"status": "success", **result}, False, False, timing
         except Exception as e:
-            return {"status": "error", "message": str(e)}, False, False
+            return {"status": "error", "message": str(e)}, False, False, None
     
+    async def _timed_coordinate_call(
+        self,
+        coord_generator: GBoxCoordinateGenerator,
+        screenshot_uri: str,
+        action_type: str,
+        target: str,
+        end_target: Optional[str] = None,
+        direction: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], CoordinateCallLog]:
+        """Execute a coordinate API call with timing.
+        
+        Returns:
+            Tuple of (result, timing_log)
+        """
+        call_log = CoordinateCallLog(action_type=action_type, target=target[:100])
+        start_time = time.time()
+        
+        try:
+            result = await coord_generator.generate_coordinates(
+                screenshot_uri=screenshot_uri,
+                action_type=action_type,
+                target=target,
+                end_target=end_target,
+                direction=direction,
+            )
+            call_log.duration = time.time() - start_time
+            call_log.success = True
+            call_log.coordinates = result.get("response", {}).get("coordinates", {}) or result.get("coordinates", {})
+            return result, call_log
+        except Exception as e:
+            call_log.duration = time.time() - start_time
+            call_log.success = False
+            call_log.error = str(e)
+            raise
+
     async def execute_action(
         self,
         action: Dict[str, Any],
         screenshot_uri: str,
-    ) -> Dict[str, Any]:
-        """Execute an action on GBox environment.
+    ) -> Tuple[Dict[str, Any], ActionTimingBreakdown]:
+        """Execute an action on GBox environment with detailed timing.
         
         Args:
             action: Action dict with action_type and parameters
             screenshot_uri: Screenshot URI for coordinate generation
             
         Returns:
-            Action result dict
+            Tuple of (action_result_dict, timing_breakdown)
         """
         action_type = action.get("action_type")
         box = self.gbox._get_box()
         
-        coord_generator = GBoxCoordinateGenerator(
-            api_key=self.gbox.api_key,
-            model="gbox-handy-1"
-        )
+        # Use cached coordinate generator
+        coord_generator = self._coord_generator
+        
+        # Initialize timing breakdown
+        timing = ActionTimingBreakdown(gbox_api_action=action_type or "")
         
         logger.debug(f"Executing action: {action_type}")
         
         if action_type == "click":
             target_desc = self.target_to_description(action.get("target", {}))
-            result = await coord_generator.generate_coordinates(
-                screenshot_uri=screenshot_uri,
-                action_type="click",
-                target=target_desc,
+            
+            # Coordinate API call with timing
+            result, call_log = await self._timed_coordinate_call(
+                coord_generator, screenshot_uri, "click", target_desc
             )
-            coords = result.get("response", {}).get("coordinates", {}) or result.get("coordinates", {})
+            timing.coordinate_calls.append(call_log)
+            timing.total_coordinate_time = call_log.duration
+            
+            coords = call_log.coordinates
             x, y = coords.get("x", 0), coords.get("y", 0)
             
             button = action.get("option", "left")
             double_click = button == "double"
             
+            # GBox API call with timing
+            gbox_start = time.time()
             result = box.action.click(x=x, y=y, button=button, double=double_click)
-            return {"action": "click", "target": target_desc, "coords": {"x": x, "y": y}}
+            timing.gbox_api_time = time.time() - gbox_start
+            
+            return {"action": "click", "target": target_desc, "coords": {"x": x, "y": y}}, timing
         
         elif action_type == "swipe":
             start_desc = self.target_to_description(action.get("start_target", {}))
             end_desc = self.target_to_description(action.get("end_target", {}))
             
-            drag_result = await coord_generator.generate_coordinates(
-                screenshot_uri=screenshot_uri,
-                action_type="drag",
-                target=start_desc,
-                end_target=end_desc,
+            # First try drag (single call for both coordinates)
+            drag_result, drag_log = await self._timed_coordinate_call(
+                coord_generator, screenshot_uri, "drag", start_desc, end_target=end_desc
             )
+            timing.coordinate_calls.append(drag_log)
+            timing.total_coordinate_time = drag_log.duration
             
             response_data = drag_result.get("response", {}) or drag_result
             coordinates = response_data.get("coordinates", {})
@@ -734,46 +839,57 @@ class GBoxAgentCore:
                 end_coords = coordinates.get("end", {})
             else:
                 # Fallback: separate calls
-                start_result = await coord_generator.generate_coordinates(
-                    screenshot_uri=screenshot_uri,
-                    action_type="click",
-                    target=start_desc,
+                start_result, start_log = await self._timed_coordinate_call(
+                    coord_generator, screenshot_uri, "click", start_desc
                 )
-                end_result = await coord_generator.generate_coordinates(
-                    screenshot_uri=screenshot_uri,
-                    action_type="click",
-                    target=end_desc,
+                timing.coordinate_calls.append(start_log)
+                
+                end_result, end_log = await self._timed_coordinate_call(
+                    coord_generator, screenshot_uri, "click", end_desc
                 )
+                timing.coordinate_calls.append(end_log)
+                
+                timing.total_coordinate_time += start_log.duration + end_log.duration
+                
                 start_coords = (start_result.get("response", {}) or start_result).get("coordinates", {})
                 end_coords = (end_result.get("response", {}) or end_result).get("coordinates", {})
             
+            # GBox API call with timing
+            gbox_start = time.time()
             result = box.action.swipe(
                 start={"x": start_coords.get("x", 0), "y": start_coords.get("y", 0)},
                 end={"x": end_coords.get("x", 0), "y": end_coords.get("y", 0)},
                 duration="300ms",
             )
-            return {"action": "swipe", "start": start_coords, "end": end_coords}
+            timing.gbox_api_time = time.time() - gbox_start
+            
+            return {"action": "swipe", "start": start_coords, "end": end_coords}, timing
         
         elif action_type == "scroll":
             target_desc = self.target_to_description(action.get("target", {}))
             direction = action.get("direction", "down")
             
-            result = await coord_generator.generate_coordinates(
-                screenshot_uri=screenshot_uri,
-                action_type="scroll",
-                target=target_desc,
-                direction=direction,
+            # Coordinate API call with timing
+            result, call_log = await self._timed_coordinate_call(
+                coord_generator, screenshot_uri, "scroll", target_desc, direction=direction
             )
-            coords = (result.get("response", {}) or result).get("coordinates", {})
+            timing.coordinate_calls.append(call_log)
+            timing.total_coordinate_time = call_log.duration
+            
+            coords = call_log.coordinates
             x, y = coords.get("x", 0), coords.get("y", 0)
             
+            # GBox API call with timing
+            gbox_start = time.time()
             result = box.action.scroll(
                 x=x,
                 y=y,
                 direction=direction,
                 distance=action.get("distance", 300),
             )
-            return {"action": "scroll", "direction": direction, "coords": {"x": x, "y": y}}
+            timing.gbox_api_time = time.time() - gbox_start
+            
+            return {"action": "scroll", "direction": direction, "coords": {"x": x, "y": y}}, timing
         
         elif action_type == "input":
             text = action.get("text", "")
@@ -781,26 +897,43 @@ class GBoxAgentCore:
             
             if target_dict:
                 target_desc = self.target_to_description(target_dict)
-                result = await coord_generator.generate_coordinates(
-                    screenshot_uri=screenshot_uri,
-                    action_type="click",
-                    target=target_desc,
+                
+                # Coordinate API call with timing
+                result, call_log = await self._timed_coordinate_call(
+                    coord_generator, screenshot_uri, "click", target_desc
                 )
-                coords = (result.get("response", {}) or result).get("coordinates", {})
+                timing.coordinate_calls.append(call_log)
+                timing.total_coordinate_time = call_log.duration
+                
+                coords = call_log.coordinates
                 box.action.click(x=coords.get("x", 0), y=coords.get("y", 0))
             
+            # GBox API call with timing
+            gbox_start = time.time()
             result = box.action.type(text=text)
-            return {"action": "input", "text": text}
+            timing.gbox_api_time = time.time() - gbox_start
+            
+            return {"action": "input", "text": text}, timing
         
         elif action_type == "key_press":
             keys = action.get("keys", [])
+            
+            # GBox API call with timing
+            gbox_start = time.time()
             result = box.action.press_key(keys=keys, combination=len(keys) > 1)
-            return {"action": "key_press", "keys": keys}
+            timing.gbox_api_time = time.time() - gbox_start
+            
+            return {"action": "key_press", "keys": keys}, timing
         
         elif action_type == "button_press":
             button = action.get("button", "home")
+            
+            # GBox API call with timing
+            gbox_start = time.time()
             result = box.action.press_button(buttons=[button])
-            return {"action": "button_press", "button": button}
+            timing.gbox_api_time = time.time() - gbox_start
+            
+            return {"action": "button_press", "button": button}, timing
         
         else:
             raise ValueError(f"Unknown action type: {action_type}")
